@@ -1,0 +1,103 @@
+import {
+  S3Client,
+  GetObjectCommand,
+  CopyObjectCommand
+} from "@aws-sdk/client-s3";
+
+import {
+  RekognitionClient,
+  SearchFacesByImageCommand
+} from "@aws-sdk/client-rekognition";
+
+import {
+  SNSClient,
+  PublishCommand
+} from "@aws-sdk/client-sns";
+
+// Initialize AWS clients (Node 22 Lambda automatically loads region)
+const s3 = new S3Client();
+const rekognition = new RekognitionClient();
+const sns = new SNSClient();
+
+// Config values
+const COLLECTION_ID = "campus-security-faces";
+const UNRECOGNIZED_BUCKET = "unrecognized-faces";
+const SNS_TOPIC_ARN = "arn:aws:sns:us-east-1:251751825970:security-alerts";
+
+export const handler = async (event) => {
+  console.log("Received event:", JSON.stringify(event, null, 2));
+
+  try {
+    const record = event.Records[0];
+    const bucket = record.s3.bucket.name;
+    const key = decodeURIComponent(record.s3.object.key.replace(/\+/g, " "));
+
+    // Only process captures folder
+    if (!key.startsWith("captures/")) {
+      console.log(`Ignoring object outside captures/: ${key}`);
+      return;
+    }
+
+    // 1. Read image from S3
+    const getObj = await s3.send(
+      new GetObjectCommand({
+        Bucket: bucket,
+        Key: key
+      })
+    );
+
+    // Convert stream → byte array
+    const imageBytes = await getObj.Body.transformToByteArray();
+
+    // 2. Rekognition search
+    const searchResult = await rekognition.send(
+      new SearchFacesByImageCommand({
+        CollectionId: COLLECTION_ID,
+        Image: { Bytes: imageBytes },
+        FaceMatchThreshold: 90,
+        MaxFaces: 1
+      })
+    );
+
+    if (searchResult.FaceMatches.length > 0) {
+      console.log(
+        `Recognized face: ${searchResult.FaceMatches[0].Face.FaceId}`
+      );
+      return {
+        statusCode: 200,
+        body: "Known face detected"
+      };
+    }
+
+    // 3. Unknown face → send SNS alert
+    console.log("Unknown face detected → sending alert...");
+
+    await sns.send(
+      new PublishCommand({
+        TopicArn: SNS_TOPIC_ARN,
+        Subject: "Security Alert: Unknown Face Detected",
+        Message: `Unknown face detected in bucket: ${bucket}, key: ${key}`
+      })
+    );
+
+    // 4. Copy to unrecognized-faces bucket
+    await s3.send(
+      new CopyObjectCommand({
+        Bucket: UNRECOGNIZED_BUCKET,
+        CopySource: `${bucket}/${key}`,
+        Key: key
+      })
+    );
+
+    console.log("Image copied to unrecognized bucket");
+
+    return {
+      statusCode: 200,
+      body: "Unknown face processed"
+    };
+
+  } catch (err) {
+    console.error("ERROR:", err);
+    throw err;
+  }
+};
