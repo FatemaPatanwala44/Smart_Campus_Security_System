@@ -1,6 +1,5 @@
 # Smart_Campus_Security_System
 A serverless AWS-based security system that automatically identifies authorized individuals using face recognition and alerts security teams in real time when unknown persons are detected.
-# Smart Campus Security System (AWS)
 
 ## Overview
 This project is a serverless Smart Campus Security System built using AWS services.
